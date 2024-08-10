@@ -116,13 +116,28 @@ int main(void)
   int delayId_0 = Delay_Start(0, 500);
   Delay_ErrorHandler(delayId_0);
 
-
+  /* Buffer to store received data and formatted message */
+  uint8_t receivedData[RX_BUFFER_SIZE];
+  char messageBuffer[RX_BUFFER_SIZE];
 
   while (1)
   {
       if (Delay_Completed(0)) {
           LED_Toggle();
           Delay_Start(0, 500);      // Restart the delay
+      }
+
+
+      /* Check if data has been received */
+      if (rxHead != rxTail) {
+          /* Receive the data */
+          UART_Receive(receivedData, 2); // Reading one byte for simplicity
+
+          /* Format the received data into a single string */
+          snprintf(messageBuffer, sizeof(messageBuffer), "Received: %c\n", receivedData[0]);
+
+          /* Send the formatted message */
+          UART_Send((uint8_t*)messageBuffer, strlen(messageBuffer));
       }
 
     /* USER CODE END WHILE */
