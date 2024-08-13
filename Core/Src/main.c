@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "stm32f1xx_hal.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -30,6 +31,10 @@ typedef struct {
 #define BAUD_RATE 115200
 #define TX_BUFFER_SIZE 128
 #define RX_BUFFER_SIZE 128
+#define CAN_BAUD_PRESCALER 2
+#define CAN_TS1 13
+#define CAN_TS2 2
+#define CAN_SJW 1
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -38,6 +43,7 @@ typedef struct {
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+CAN_HandleTypeDef hcan;
 
 /* USER CODE BEGIN PV */
 volatile int Globalcounter = 0;
@@ -49,6 +55,7 @@ volatile uint8_t txTail = 0;
 volatile uint8_t rxHead = 0;
 volatile uint8_t rxTail = 0;
 volatile uint8_t txBusy = 0;
+char UART_MSGBUFFER[TX_BUFFER_SIZE];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -67,6 +74,10 @@ void UART_Init(void);
 void UART_Send(uint8_t *data, uint16_t size);
 void UART_Receive(uint8_t *data, uint16_t size);
 void USART1_IRQHandler(void);
+void CAN_Init(void);
+int CAN_Transmit(uint32_t stdId, uint8_t *data, uint8_t len);
+int CAN_Receive(uint8_t *data, uint8_t *len);
+void CAN_ErrorHandler(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -106,38 +117,63 @@ int main(void)
   LED_Init();
   Delay_Init();
   UART_Init();
+  CAN_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  char startmsg[] = "Starting UART....\n";
-  UART_Send((uint8_t*)startmsg, strlen(startmsg));
-
   int delayId_0 = Delay_Start(0, 500);
   Delay_ErrorHandler(delayId_0);
 
-  /* Buffer to store received data and formatted message */
-  uint8_t receivedData[RX_BUFFER_SIZE];
-  char messageBuffer[RX_BUFFER_SIZE];
+  char startmsg[] = "Starting UART....\n";
+  UART_Send((uint8_t*)startmsg, strlen(startmsg));
+
+  /* Buffer to store received data and formatted message for uart */
+//  uint8_t receivedData[RX_BUFFER_SIZE];
+//  char messageBuffer[RX_BUFFER_SIZE];
+
+  uint8_t txData[8] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+  uint8_t rxData[8];
+  uint8_t len;
 
   while (1)
   {
-      if (Delay_Completed(0)) {
+      if (Delay_Completed(0))
+      {
           LED_Toggle();
           Delay_Start(0, 500);      // Restart the delay
       }
 
+      // Transmit a CAN message
+      if (CAN_Transmit(0x123, txData, 8) == 0)
+      {
+          // Transmission was successful
+          snprintf(UART_MSGBUFFER, sizeof(UART_MSGBUFFER), "CAN Transmit Successful\r\n");
+          UART_Send((uint8_t*)UART_MSGBUFFER, strlen(UART_MSGBUFFER));
+      }
+      else
+      {
+          // Transmission failed
+          CAN_ErrorHandler();
+      }
 
-      /* Check if data has been received */
-      if (rxHead != rxTail) {
-          /* Receive the data */
-          UART_Receive(receivedData, 2); // Reading one byte for simplicity
+      // Receive a CAN message
+      if (CAN_Receive(rxData, &len) == 0)
+      {
+          // Process received message
+          snprintf(UART_MSGBUFFER, sizeof(UART_MSGBUFFER), "CAN Receive: ID=0x%03X, Length=%d, Data=", 0x123, len);
 
-          /* Format the received data into a single string */
-          snprintf(messageBuffer, sizeof(messageBuffer), "Received: %c\n", receivedData[0]);
+          for (uint8_t i = 0; i < len; i++) {
+              snprintf(UART_MSGBUFFER + strlen(UART_MSGBUFFER), sizeof(UART_MSGBUFFER) - strlen(UART_MSGBUFFER), " %02X", rxData[i]);
+          }
 
-          /* Send the formatted message */
-          UART_Send((uint8_t*)messageBuffer, strlen(messageBuffer));
+          snprintf(UART_MSGBUFFER + strlen(UART_MSGBUFFER), sizeof(UART_MSGBUFFER) - strlen(UART_MSGBUFFER), "\r\n");
+          UART_Send((uint8_t*)UART_MSGBUFFER, strlen(UART_MSGBUFFER));
+      }
+      else
+      {
+          // Reception failed or no message available
+          CAN_ErrorHandler();
       }
 
     /* USER CODE END WHILE */
@@ -273,7 +309,7 @@ void Delay_ErrorHandler(int delayid)
 {
 	if (delayid == (-1))
 	{
-		char errormsg[] = "Invalid Delay Id choosen....\n";
+		char errormsg[] = "Invalid Delay Id chosen....\n";
 		UART_Send((uint8_t*)errormsg, strlen(errormsg));
 	}
 }
@@ -349,6 +385,172 @@ void USART1_IRQHandler(void)
             txBusy = 0;
         }
     }
+}
+
+
+void CAN_Init(void)
+{
+	/* Enable clock for GPIOB and CAN */
+	 RCC->APB2ENR |= RCC_APB2ENR_IOPBEN;  // GPIOB clock
+	 RCC->APB1ENR |= RCC_APB1ENR_CAN1EN;  // CAN clock
+
+	 /* Configure PB8 as CAN_RX (input floating) */
+	 GPIOB->CRH &= ~(GPIO_CRH_CNF8 | GPIO_CRH_MODE8);
+	 GPIOB->CRH |= GPIO_CRH_CNF8_0;  // Input floating
+
+	 /* Configure PB9 as CAN_TX (alternate function push-pull) */
+	 GPIOB->CRH &= ~(GPIO_CRH_CNF9 | GPIO_CRH_MODE9);
+	 GPIOB->CRH |= GPIO_CRH_CNF9_1 | GPIO_CRH_MODE9_0;  // Alternate function push-pull, 10 MHz
+
+    /* Enter initialization mode */
+    CAN1->MCR = CAN_MCR_INRQ;
+    while (!(CAN1->MSR & CAN_MSR_INAK)); // Wait until initialization mode is entered
+
+    // Check if the CAN peripheral entered initialization mode
+    if (CAN1->MSR & CAN_MSR_INAK) {
+        snprintf(UART_MSGBUFFER, sizeof(UART_MSGBUFFER), "CAN Initialization successful\r\n");
+        UART_Send((uint8_t*)UART_MSGBUFFER, strlen(UART_MSGBUFFER));
+    } else {
+        snprintf(UART_MSGBUFFER, sizeof(UART_MSGBUFFER), "CAN Initialization failed\r\n");
+        UART_Send((uint8_t*)UART_MSGBUFFER, strlen(UART_MSGBUFFER));
+    }
+
+    /* Set CAN bit timing */
+    CAN1->BTR = (CAN_SJW - 1) << 24 |
+                (CAN_TS1 - 1) << 16 |
+                (CAN_TS2 - 1) << 20 |
+                (CAN_BAUD_PRESCALER - 1);
+
+    /* Leave initialization mode, enter normal mode */
+    CAN1->MCR &= ~CAN_MCR_INRQ;
+    while (CAN1->MSR & CAN_MSR_INAK); // Wait until normal mode is entered
+
+    // Check if the CAN peripheral entered normal mode
+    if (!(CAN1->MSR & CAN_MSR_INAK)) {
+        snprintf(UART_MSGBUFFER, sizeof(UART_MSGBUFFER), "CAN Entered Normal mode\r\n");
+        UART_Send((uint8_t*)UART_MSGBUFFER, strlen(UART_MSGBUFFER));
+    } else {
+        snprintf(UART_MSGBUFFER, sizeof(UART_MSGBUFFER), "CAN Failed to enter Normal mode\r\n");
+        UART_Send((uint8_t*)UART_MSGBUFFER, strlen(UART_MSGBUFFER));
+    }
+
+    /* Set CAN filters to accept all messages */
+    CAN1->FMR |= CAN_FMR_FINIT;  // Enter filter initialization mode
+    CAN1->FA1R &= ~CAN_FA1R_FACT; // Disable all filters
+
+    /* Filter 0: accept all standard IDs */
+    CAN1->FS1R |= CAN_FS1R_FSC;  // Single 32-bit scale configuration
+    CAN1->FM1R &= ~CAN_FM1R_FBM; // Identifier mask mode
+    CAN1->sFilterRegister[0].FR1 = 0x00000000; // Filter ID
+    CAN1->sFilterRegister[0].FR2 = 0x00000000; // Filter mask
+    CAN1->FA1R |= CAN_FA1R_FACT;  // Enable filter 0
+
+    CAN1->FMR &= ~CAN_FMR_FINIT;  // Leave filter initialization mode
+}
+
+int CAN_Transmit(uint32_t stdId, uint8_t *data, uint8_t len)
+{
+    uint32_t timeout = 100000;  // Arbitrary timeout value
+
+    // Wait for an empty transmit mailbox
+    while (!(CAN1->TSR & CAN_TSR_TME0))
+    {
+        if (--timeout == 0) {
+            snprintf(UART_MSGBUFFER, sizeof(UART_MSGBUFFER), "CAN Transmit Timeout\r\n");
+            UART_Send((uint8_t*)UART_MSGBUFFER, strlen(UART_MSGBUFFER));
+            return -1;
+        }
+    }
+
+    // Configure the TX mailbox with the standard ID and data length
+    CAN1->sTxMailBox[0].TIR = stdId << 21;
+    CAN1->sTxMailBox[0].TDTR = len & 0x0F;
+    CAN1->sTxMailBox[0].TDLR = *((uint32_t *)data); // First 4 bytes of data
+    if (len > 4) {
+        CAN1->sTxMailBox[0].TDHR = *((uint32_t *)(data + 4)); // Remaining data
+    }
+
+    // Request transmission
+    CAN1->sTxMailBox[0].TIR |= CAN_TI0R_TXRQ;
+
+    timeout = 100000;  // Reset timeout
+
+    // Wait for transmission complete
+    while (!(CAN1->TSR & CAN_TSR_RQCP0))
+    {
+        if (--timeout == 0) {
+            snprintf(UART_MSGBUFFER, sizeof(UART_MSGBUFFER), "CAN Transmit Complete Timeout\r\n");
+            UART_Send((uint8_t*)UART_MSGBUFFER, strlen(UART_MSGBUFFER));
+            return -1;
+        }
+    }
+
+    // Clear the transmission request complete flag
+    CAN1->TSR |= CAN_TSR_RQCP0;
+
+    // Check if transmission was successful
+    if (CAN1->TSR & CAN_TSR_TXOK0) {
+        return 0; // Transmission OK
+    } else {
+        return -1; // Transmission error
+    }
+}
+
+
+int CAN_Receive(uint8_t *data, uint8_t *len)
+{
+    // Check if there is a message in FIFO 0
+    if (!(CAN1->RF0R & CAN_RF0R_FMP0)) {
+        return -1; // No message available
+    }
+
+    // Get the received message length
+    *len = CAN1->sFIFOMailBox[0].RDTR & 0x0F;
+
+    // Read the data
+    *((uint32_t *)data) = CAN1->sFIFOMailBox[0].RDLR;
+    if (*len > 4) {
+        *((uint32_t *)(data + 4)) = CAN1->sFIFOMailBox[0].RDHR;
+    }
+
+    // Release the FIFO
+    CAN1->RF0R |= CAN_RF0R_RFOM0;
+
+    return 0; // Receive OK
+}
+
+void CAN_ErrorHandler(void)
+{
+    char error_msg[64];
+
+    // Read CAN error status register
+    uint32_t esr = CAN1->ESR;
+
+    // Check for different error conditions
+    if (esr & CAN_ESR_BOFF) {
+        snprintf(error_msg, sizeof(error_msg), "CAN Bus-Off Error\r\n");
+    } else if (esr & CAN_ESR_EPVF) {
+        snprintf(error_msg, sizeof(error_msg), "CAN Error Passive\r\n");
+    } else if (esr & CAN_ESR_EWGF) {
+        snprintf(error_msg, sizeof(error_msg), "CAN Error Warning\r\n");
+    } else if (esr & CAN_ESR_LEC) {
+        // Last Error Code (LEC) interpretation
+        switch ((esr >> 4) & 0x07) {
+            case 0x01: snprintf(error_msg, sizeof(error_msg), "CAN Stuff Error\r\n"); break;
+            case 0x02: snprintf(error_msg, sizeof(error_msg), "CAN Form Error\r\n"); break;
+            case 0x03: snprintf(error_msg, sizeof(error_msg), "CAN Acknowledge Error\r\n"); break;
+            case 0x04: snprintf(error_msg, sizeof(error_msg), "CAN Bit recessive Error\r\n"); break;
+            case 0x05: snprintf(error_msg, sizeof(error_msg), "CAN Bit dominant Error\r\n"); break;
+            case 0x06: snprintf(error_msg, sizeof(error_msg), "CAN CRC Error\r\n"); break;
+            case 0x07: snprintf(error_msg, sizeof(error_msg), "CAN Set by software\r\n"); break;
+            default: snprintf(error_msg, sizeof(error_msg), "Unknown CAN Error\r\n"); break;
+        }
+    } else {
+        snprintf(error_msg, sizeof(error_msg), "No CAN Error Detected\r\n");
+    }
+
+    // Send error message via UART
+    UART_Send((uint8_t*)error_msg, strlen(error_msg));
 }
 
 /* USER CODE END 4 */
